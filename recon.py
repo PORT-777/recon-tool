@@ -11,7 +11,7 @@ Author: PORT 777
 """
 
 import argparse, asyncio, json, os, re, socket, subprocess, sys, time
-from urllib.parse import quote, urlparse, parse_qs
+from urllib.parse import quote, urlparse, parse_qs, urljoin
 from email.utils import parseaddr
 from collections import defaultdict
 from pathlib import Path
@@ -23,7 +23,7 @@ from colorama import Fore, Style, init
 
 init(autoreset=True)
 
-VERSION = "5.0.0"
+VERSION = "6.0.0"
 
 # ── API Keys (from ~/.recon-tool/api-keys.yaml or env vars) ──
 # Format (YAML):
@@ -81,7 +81,28 @@ DNS_WORDLIST = [
     "go", "lp", "landing", "offer", "promo", "campaign", "marketing", "email",
     "click", "track", "links", "redirect", "go2", "click2", "r", "s",
     "t", "w", "w3", "w5", "ww", "www1", "www2", "www3", "www4",
-    "www5", "www6", "www7", "www8", "www9",     "www10",
+    "www5", "www6", "www7", "www8", "www9", "www10",
+]
+
+API_ENDPOINTS = [
+    "api", "api/v1", "api/v2", "api/v3", "v1", "v2", "v3",
+    "graphql", "rest", "swagger", "swagger.json", "openapi.json",
+    "api/docs", "docs", "api/documentation", "documentation",
+    "health", "healthz", "status", "ping", "heartbeat",
+    "login", "signin", "auth", "oauth", "token", "authorize",
+    "admin", "administrator", "admin/api", "manage", "dashboard",
+    "config", "configuration", "settings", "env", "environment",
+    "users", "user", "accounts", "profile", "me", "whoami",
+    "search", "query", "suggest", "autocomplete", "lookup",
+    "upload", "download", "export", "import", "files", "media",
+    "webhook", "webhooks", "callback", "notify", "notification",
+    "metrics", "monitor", "stats", "statistics", "analytics",
+    "graph", "chart", "data", "feed", "rss", "atom",
+    ".git/config", ".env", "robots.txt", "sitemap.xml",
+    "cron", "cronjob", "task", "queue", "job", "worker",
+    "proxy", "redirect", "forward", "relay", "gateway",
+    "beta", "alpha", "test", "staging", "dev", "debug",
+    "internal", "private", "secret", "hidden",
 ]
 
 # ── Takeover fingerprints ──
@@ -707,6 +728,66 @@ except Exception as e:
                 except:
                     pass
 
+    # ── API Endpoint Scan ──
+    async def scan_api(self, wordlist: list = None):
+        words = wordlist or API_ENDPOINTS
+        targets = list(self.results["subdomains"])[:3]
+        if not targets:
+            targets = [self.domain]
+        async def _check(target, path):
+            for proto in ("https", "http"):
+                url = f"{proto}://{target}/{path.lstrip('/')}"
+                try:
+                    r = await self.client.get(url, timeout=5)
+                    if r.status_code in (200, 201, 204, 301, 302, 401, 403):
+                        self.results["urls"].add(url)
+                except:
+                    pass
+        tasks = [_check(t, p) for t in targets for p in words[:self.limit]]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    # ── Shodan Host Enrich (-s flag) ──
+    async def shodan_enrich(self):
+        key = API_KEYS.get("shodan")
+        if not key:
+            return
+        for ip in list(self.results["ips"])[:10]:
+            try:
+                url = f"https://api.shodan.io/shodan/host/{ip}?key={key}"
+                r = await self.client.get(url)
+                if r.status_code == 200:
+                    data = r.json()
+                    for hostname in data.get("hostnames", []):
+                        h = hostname.lower()
+                        if h.endswith(self.domain) and is_valid_subdomain(h, self.domain):
+                            self.results["subdomains"].add(h)
+                    for port in data.get("ports", []):
+                        self.results["urls"].add(f"{ip}:{port}")
+                    os_data = data.get("os", "")
+                    if os_data:
+                        self.results["names"].add(f"{ip} OS: {os_data}")
+            except:
+                pass
+
+    # ── Custom DNS Resolve ──
+    async def dns_resolve_custom(self, dns_server: str):
+        if not self.results["subdomains"]:
+            return
+        try:
+            for sub in list(self.results["subdomains"]):
+                try:
+                    result = await asyncio.create_subprocess_exec(
+                        "nslookup", sub, dns_server,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                    await result.wait()
+                except:
+                    pass
+        except:
+            pass
+
     # ── Extract emails from collected URLs ──
     def extract_emails_from_urls(self):
         email_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
@@ -749,11 +830,18 @@ except Exception as e:
             "dns_resolve": self.dns_resolve,
             "vhost": self.detect_vhosts,
             "screenshot": lambda: None,
+            "api_scan": self.scan_api,
+            "shodan_enrich": self.shodan_enrich,
+            "dns_custom": lambda: None,
         }
         screenshot_dir = None
+        dns_server = None
         for src in sources:
             if src.startswith("screenshot="):
                 screenshot_dir = src.split("=", 1)[1]
+                continue
+            if src.startswith("dns_custom="):
+                dns_server = src.split("=", 1)[1]
                 continue
             fn = source_map.get(src)
             if fn:
@@ -769,8 +857,14 @@ except Exception as e:
             await self.dns_resolve()
         if "vhost" in sources or "all" in sources:
             await self.detect_vhosts()
+        if "api_scan" in sources or "all" in sources:
+            await self.scan_api()
+        if "shodan_enrich" in sources or "all" in sources:
+            await self.shodan_enrich()
         if screenshot_dir:
             await self.take_screenshots(screenshot_dir)
+        if dns_server:
+            await self.dns_resolve_custom(dns_server)
 
     def summary(self):
         takeovers = sorted(self.results["takeovers"])
@@ -822,6 +916,9 @@ def parse_args():
     p.add_argument("-r", "--dns-resolve", action="store_true", help="Resolve all discovered subdomains to IPs")
     p.add_argument("--vhost", action="store_true", help="Detect virtual hosts (multiple subdomains on same IP)")
     p.add_argument("--screenshot", metavar="DIR", help="Take screenshots of discovered subdomains (requires selenium)")
+    p.add_argument("-a", "--api-scan", action="store_true", help="Scan for API endpoints on discovered subdomains")
+    p.add_argument("-s", "--shodan", action="store_true", help="Enrich hosts with Shodan data (requires SHODAN_API_KEY)")
+    p.add_argument("-e", "--dns-server", metavar="DNS", help="Custom DNS server for resolution")
     p.add_argument("-q", "--quiet", action="store_true", help="Suppress missing API key warnings")
     p.add_argument("--no-banner", action="store_true", help="Suppress banner")
     return p.parse_args()
@@ -906,7 +1003,21 @@ def main():
     if config_path.exists():
         print(f"{Colors.INFO}Read api-keys from {config_path}{Colors.R}")
 
-    sources = ["google", "bing", "baidu", "yahoo", "crtsh", "dns", "otx", "wayback", "github", "pastes", "dnsdumpster", "threatcrowd", "rapiddns", "urlscan", "bufferover", "certspotter", "shodan_idb", "linkedin"]
+    api_sources = ["shodan", "hunter", "securitytrails", "virustotal"]
+    if args.sources == "all":
+        sources = ["google", "bing", "baidu", "yahoo", "crtsh", "dns", "otx", "wayback", "github", "pastes", "dnsdumpster", "threatcrowd", "rapiddns", "urlscan", "bufferover", "certspotter", "shodan_idb", "linkedin"]
+        for s in api_sources:
+            if API_KEYS.get(s):
+                sources.append(s)
+            elif not args.quiet:
+                print(f"{Colors.WARN}[!] Missing API key for {s}{Colors.R}")
+    else:
+        sources = [s.strip().lower() for s in args.sources.split(",")]
+        for s in sources:
+            if s in api_sources and not API_KEYS.get(s) and not args.quiet:
+                print(f"{Colors.WARN}[!] Missing API key for {s}{Colors.R}")
+
+    # Flag-based sources (add to whatever -b specified)
     if args.dns_brute:
         sources.append("dns_brute")
     if args.takeover:
@@ -917,21 +1028,16 @@ def main():
         sources.append("dns_resolve")
     if args.vhost:
         sources.append("vhost")
+    if args.api_scan:
+        sources.append("api_scan")
+    if args.shodan:
+        sources.append("shodan_enrich")
+        if not API_KEYS.get("shodan") and not args.quiet:
+            print(f"{Colors.WARN}[!] Missing API key for shodan (required for -s){Colors.R}")
     if args.screenshot:
         sources.append(f"screenshot={args.screenshot}")
-    api_sources = ["shodan", "hunter", "securitytrails", "virustotal"]
-    if args.sources == "all":
-        for s in api_sources:
-            if API_KEYS.get(s):
-                sources.append(s)
-            elif not args.quiet:
-                print(f"{Colors.WARN}[!] Missing API key for {s}{Colors.R}")
-    else:
-        user_sources = [s.strip().lower() for s in args.sources.split(",")]
-        for s in user_sources:
-            if s in api_sources and not API_KEYS.get(s) and not args.quiet:
-                print(f"{Colors.WARN}[!] Missing API key for {s}{Colors.R}")
-        sources = user_sources
+    if args.dns_server:
+        sources.append(f"dns_custom={args.dns_server}")
 
     print(f"{Colors.INFO}[*] Target:{Colors.R} {args.domain}")
     print(f"{Colors.INFO}[*] Sources:{Colors.R} {', '.join(sources)}")
