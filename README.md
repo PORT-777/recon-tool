@@ -1,36 +1,21 @@
-# 🔍 recon-tool — Multi-Source OSINT Reconnaissance
+# recon-tool
 
-[![Version](https://img.shields.io/badge/version-6.0.0-brightgreen)](https://github.com/PORT-777/recon-tool)
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-orange)](https://github.com/PORT-777/recon-tool)
-[![GitHub](https://img.shields.io/badge/GitHub-PORT--777-181717?logo=github)](https://github.com/PORT-777)
+Multi-source OSINT reconnaissance tool for email, subdomain, IP, name, and URL discovery.
 
-> A powerful async OSINT recon tool that extracts **emails**, **subdomains**, **IPs**, **names**, **URLs**, and detects **takeovers** from a target domain using 17+ public data sources.
->
-> Built for bug bounty hunters, penetration testers, and OSINT researchers.
+## Features
 
----
+- **22 data sources** — search engines, certificate transparency, DNS databases, passive DNS, archives, code repositories, paste sites, professional networks, and API feeds
+- **Async concurrency** — all sources execute simultaneously for maximum speed
+- **Subdomain takeover detection** — 22 cloud service fingerprints (AWS, GitHub Pages, Heroku, Azure, CloudFront, Shopify, Netlify, Vercel, etc.)
+- **API endpoint discovery** — 100+ common API paths scanned across discovered hosts
+- **DNS brute force** — 100 built-in subdomain words with custom wordlist support
+- **Page content scraping** — extracts emails and names from discovered URLs
+- **Virtual host detection** — identifies multiple subdomains sharing the same IP
+- **Screenshots** — headless Chrome capture of discovered subdomains
+- **Proxy support** — HTTP/HTTPS/SOCKS5
+- **Output formats** — text, JSON, HTML report
 
-## 📡 Features
-
-- ⚡ **Async** — all 17+ sources run concurrently (5x faster than theHarvester)
-- 📧 **Email extraction** (from pages, URLs, SSL certs, Hunter.io)
-- 🌐 **Subdomain discovery** (crt.sh, DNS, OTX, RapidDNS, BufferOver, CertSpotter, SecurityTrails, VirusTotal, DNS brute-force)
-- 📡 **IP discovery** (DNS, passive DNS, Shodan, BufferOver)
-- 👥 **People discovery** (LinkedIn, Hunter.io, page scraping)
-- 🔗 **URL collection** (search engines, Wayback, GitHub, Pastebin, URLScan)
-- 🚩 **Takeover detection** (AWS S3, GitHub Pages, Heroku, Azure, CloudFront, Shopify, +15 more)
-- 📄 **Page scraping** — fetches each URL and extracts emails + names
-- 🔌 **API endpoint scanning** (`-a`) — discovers 200+ common API paths
-- 🖼️ **Screenshots** (`--screenshot`) — captures screenshots of subdomains (requires Selenium)
-- 🖥️ **Virtual host detection** (`--vhost`)
-- 🌐 **Proxy support** (`-p`) — HTTP/HTTPS/SOCKS5
-- 📊 **Output formats**: Text, JSON, HTML report
-- 🔑 **API keys** from `~/.recon-tool/api-keys.yaml` or environment variables
-
----
-
-## 🚀 Installation
+## Installation
 
 ```bash
 git clone https://github.com/PORT-777/recon-tool.git
@@ -38,146 +23,83 @@ cd recon-tool
 pip install -r requirements.txt
 ```
 
-## 📖 Usage
+## Usage
 
 ```bash
 python recon.py -d example.com -b all
-python recon.py -d example.com -b google,crtsh -l 200
+python recon.py -d example.com -b crtsh,dns,urlscan -l 200
 python recon.py -d example.com -b all -o html
+python recon.py -d example.com -b dns -c --takeover --scrape --vhost --screenshot ./shots
 ```
 
-### Options
+### Arguments
 
 | Flag | Description |
 |------|-------------|
-| `-d` | Target domain (required) |
-| `-b` | Sources: comma-separated or `all` |
-| `-l` | Max results per source (default: 100) |
-| `-t` | HTTP timeout in seconds (default: 20) |
-| `-o` | Output format: `text`, `json`, or `html` |
-| `-w` | Custom wordlist file for DNS brute force |
-| `-c` | Enable DNS brute force subdomain discovery |
-| `-p` | Proxy URL (e.g. `http://127.0.0.1:8080`) |
-| `-r` | Resolve all discovered subdomains to IPs |
-| `-a` | Scan for API endpoints on subdomains |
-| `-s` | Enrich hosts with Shodan data (requires SHODAN_API_KEY) |
-| `-e` | Custom DNS server for resolution |
-| `-q` | Suppress missing API key warnings |
-| `--takeover` | Check subdomains for takeover vulnerabilities |
-| `--scrape` | Scrape page content for emails and names |
+| `-d` | Target domain |
+| `-b` | Sources (comma-separated or `all`) |
+| `-l` | Max results per source |
+| `-t` | HTTP timeout |
+| `-o` | Output format: `text`, `json`, `html` |
+| `-w` | Custom wordlist for DNS brute force |
+| `-c` | Enable DNS brute force |
+| `-p` | Proxy URL |
+| `-r` | Resolve subdomains to IPs |
+| `-a` | API endpoint scan |
+| `-s` | Shodan enrichment |
+| `-e` | Custom DNS server |
+| `-q` | Suppress API key warnings |
+| `--takeover` | Check for subdomain takeovers |
+| `--scrape` | Scrape page content |
 | `--vhost` | Detect virtual hosts |
-| `--screenshot DIR` | Take screenshots of subdomains (requires Selenium) |
+| `--screenshot` | Capture screenshots |
 | `--no-banner` | Suppress startup banner |
 
-### 🔑 API Keys
+### API Keys
 
-Create `~/.recon-tool/api-keys.yaml`:
+Place keys in `~/.recon-tool/api-keys.yaml`:
 
 ```yaml
-shodan: YOUR_SHODAN_KEY
-hunter: YOUR_HUNTER_KEY
-securitytrails: YOUR_SECURITYTRAILS_KEY
-virustotal: YOUR_VIRUSTOTAL_KEY
+shodan: YOUR_KEY
+hunter: YOUR_KEY
+securitytrails: YOUR_KEY
+virustotal: YOUR_KEY
 ```
 
-Or set environment variables:
+Or use environment variables: `SHODAN_API_KEY`, `HUNTER_API_KEY`, `SECURITYTRAILS_API_KEY`, `VIRUSTOTAL_API_KEY`.
 
-```bash
-export SHODAN_API_KEY="..."
-export HUNTER_API_KEY="..."
-export SECURITYTRAILS_API_KEY="..."
-export VIRUSTOTAL_API_KEY="..."
-```
+## Sources
 
----
-
-## 📡 Sources
-
-| Source | Type | Description |
+| Source | Data | Description |
 |--------|------|-------------|
-| `google` | URLs | Google search engine |
-| `bing` | URLs | Bing search engine |
-| `baidu` | URLs | Baidu search engine |
-| `yahoo` | URLs | Yahoo search engine |
-| `crtsh` | Subdomains, Emails | Certificate Transparency logs |
-| `dns` | Subdomains, IPs | HackerTarget DNS lookup |
-| `otx` | Subdomains, IPs | AlienVault OTX passive DNS |
-| `wayback` | URLs, Emails | Wayback Machine archive |
+| `google` | URLs | Google search |
+| `bing` | URLs | Bing search |
+| `baidu` | URLs | Baidu search |
+| `yahoo` | URLs | Yahoo search |
+| `crtsh` | Subdomains, Emails | Certificate Transparency |
+| `dns` | Subdomains, IPs | HackerTarget DNS |
+| `otx` | Subdomains, IPs | AlienVault OTX |
+| `wayback` | URLs, Emails | Wayback Machine |
 | `github` | URLs | GitHub code search |
-| `pastes` | URLs | Pastebin dump search |
-| `dnsdumpster` | Subdomains | DNSDumpster DNS recon |
-| `threatcrowd` | Subdomains, IPs | ThreatCrowd passive DNS |
-| `rapiddns` | Subdomains | RapidDNS.io DNS database |
-| `urlscan` | URLs, Subdomains, IPs | URLScan.io scan results |
-| `bufferover` | Subdomains, IPs | BufferOver.run DNS data |
-| `certspotter` | Subdomains | CertSpotter certificate transparency |
-| `shodan_idb` | Subdomains | Shodan InternetDB (free, no key) |
-| `linkedin` | People | LinkedIn profile discovery |
-| `shodan` | Subdomains, IPs | Shodan API (requires key) |
-| `hunter` | Emails, People | Hunter.io email search (requires key) |
-| `securitytrails` | Subdomains, IPs | SecurityTrails DNS history (requires key) |
-| `virustotal` | Subdomains | VirusTotal passive DNS (requires key) |
-| `dns_brute` | Subdomains, IPs | DNS brute force with wordlist |
+| `pastes` | URLs | Pastebin search |
+| `dnsdumpster` | Subdomains | DNSDumpster |
+| `threatcrowd` | Subdomains, IPs | ThreatCrowd |
+| `rapiddns` | Subdomains | RapidDNS.io |
+| `urlscan` | URLs, Subdomains, IPs | URLScan.io |
+| `bufferover` | Subdomains, IPs | BufferOver.run |
+| `certspotter` | Subdomains | CertSpotter |
+| `shodan_idb` | Subdomains | Shodan InternetDB |
+| `linkedin` | People | LinkedIn profiles |
+| `shodan` | Subdomains, IPs | Shodan API |
+| `hunter` | Emails, People | Hunter.io |
+| `securitytrails` | Subdomains, IPs | SecurityTrails |
+| `virustotal` | Subdomains | VirusTotal |
+| `dns_brute` | Subdomains, IPs | DNS brute force |
 | `api_scan` | URLs | API endpoint discovery |
-| `takeover` | Takeovers | Subdomain takeover detection |
-| `scrape` | Emails, People | Page content scraping |
+| `takeover` | Takeovers | Subdomain takeover check |
+| `scrape` | Emails, People | Page scraping |
 
----
-
-## 📊 Output Examples
-
-### Text
-```
-═══ Results for hackerone.com ═══
-  Emails:     2
-  Subdomains: 21
-  IPs:        15
-  URLs:       50
-  Names:      5
-  VHosts:     3
-  Screenshots:0
-  Time:       31.6s
-
-── Emails ──
-  support@hackerone.com
-  admin@hackerone.com
-
-── Subdomains ──
-  api.hackerone.com
-  docs.hackerone.com
-  www.hackerone.com
-  ...
-```
-
-### HTML Report
-Generate a dark-themed HTML report:
-```bash
-python recon.py -d example.com -b all -o html
-```
-
----
-
-## 📈 Comparison: recon-tool vs theHarvester
-
-| Feature | theHarvester | recon-tool |
-|---------|:------------:|:----------:|
-| Async (faster) | ❌ | ✅ |
-| 17+ free sources | ❌ | ✅ |
-| LinkedIn | ✅ | ✅ |
-| Takeover detection | ✅ | ✅ |
-| DNS brute force | ✅ | ✅ |
-| Screenshots | ✅ | ✅ |
-| API endpoint scan (`-a`) | ✅ | ✅ |
-| Shodan enrich (`-s`) | ✅ | ✅ |
-| Custom DNS (`-e`) | ✅ | ✅ |
-| Proxy support | ✅ | ✅ |
-| Page content scraping | ❌ | ✅ |
-| Virtual host detection | ❌ | ✅ |
-| HTML report | ❌ | ✅ |
-
----
-
-## 👤 Author
+## Author
 
 **0xMr.PORT 777**
 
@@ -189,8 +111,6 @@ python recon.py -d example.com -b all -o html
 [![TikTok](https://img.shields.io/badge/TikTok-000000?style=flat&logo=tiktok&logoColor=white)](https://www.tiktok.com/@i_c.n1)
 [![Telegram Channel](https://img.shields.io/badge/Channel-26A5E4?style=flat&logo=telegram&logoColor=white)](https://t.me/f_c_o_6)
 
----
+## License
 
-## 📜 License
-
-MIT — see [LICENSE](LICENSE) for details.
+MIT
