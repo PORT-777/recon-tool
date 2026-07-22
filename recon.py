@@ -10,10 +10,11 @@ Usage:
 Author: PORT 777
 """
 
-import argparse, asyncio, json, re, sys, time
+import argparse, asyncio, json, os, re, socket, sys, time
 from urllib.parse import quote, urlparse, parse_qs
 from email.utils import parseaddr
 from collections import defaultdict
+from pathlib import Path
 
 import httpx
 from bs4 import BeautifulSoup
@@ -21,7 +22,37 @@ from colorama import Fore, Style, init
 
 init(autoreset=True)
 
-VERSION = "2.0.0"
+VERSION = "3.0.0"
+
+# ── API Keys (from env vars) ──
+API_KEYS = {
+    "shodan": os.getenv("SHODAN_API_KEY", ""),
+    "hunter": os.getenv("HUNTER_API_KEY", ""),
+    "securitytrails": os.getenv("SECURITYTRAILS_API_KEY", ""),
+    "virustotal": os.getenv("VIRUSTOTAL_API_KEY", ""),
+}
+
+DNS_WORDLIST = [
+    "www", "mail", "remote", "blog", "webmail", "server", "ns1", "ns2",
+    "smtp", "secure", "vpn", "api", "dev", "test", "admin", "ftp", "mail2",
+    "pop3", "imap", "m", "mxs", "mx", "stage", "beta", "docs", "help",
+    "support", "status", "cdn", "cdn1", "cdn2", "static", "media", "img",
+    "img1", "css", "js", "app", "mobile", "shop", "store", "portal", "web",
+    "db", "sql", "mysql", "backup", "proxy", "router", "gateway", "firewall",
+    "dns", "dns1", "dns2", "ntp", "ldap", "radius", "radius1", "radius2",
+    "chat", "community", "forum", "board", "news", "info", "download", "downloads",
+    "upload", "crm", "erp", "hr", "pay", "payment", "billing", "invoice",
+    "git", "svn", "jira", "confluence", "wiki", "jenkins", "ci", "build",
+    "monitor", "monitoring", "logs", "analytics", "tracker", "tracking", "stats",
+    "edge", "origin", "pixel", "event", "data", "s3", "assets", "files",
+    "video", "tv", "radio", "stream", "live", "player", "streaming", "media",
+    "calendar", "contacts", "sync", "office", "outlook", "exchange", "owa",
+    "autodiscover", "lync", "skype", "teams", "zoom", "webex", "meet",
+    "go", "lp", "landing", "offer", "promo", "campaign", "marketing", "email",
+    "click", "track", "links", "redirect", "go2", "click2", "r", "s",
+    "t", "w", "w3", "w5", "ww", "www1", "www2", "www3", "www4",
+    "www5", "www6", "www7", "www8", "www9", "www10",
+]
 
 # ──────────────────────────────────────────────
 #  HELPERS
@@ -74,14 +105,15 @@ def domain_from_email(email: str):
 
 
 class ReconEngine:
-    def __init__(self, domain: str, limit: int = 100, timeout: int = 20):
+    def __init__(self, domain: str, limit: int = 100, timeout: int = 20, wordlist: list = None):
         self.domain = domain.lower().strip()
         self.limit = limit
+        self.wordlist = wordlist or DNS_WORDLIST
         self.client = httpx.AsyncClient(
             timeout=timeout,
             verify=False,
             follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) recon-tool/2.0"}
+            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) recon-tool/3.0"}
         )
         self.results = defaultdict(set)
 
@@ -374,6 +406,135 @@ class ReconEngine:
         except:
             pass
 
+    # ── LinkedIn (via Google dorking) ──
+    async def search_linkedin(self):
+        company = self.domain.split('.')[0].capitalize()
+        q = quote(f'site:linkedin.com/in/ "{company}"')
+        url = f"https://www.bing.com/search?q={q}&count=30"
+        try:
+            r = await self.client.get(url)
+            if r.status_code == 200:
+                soup = BeautifulSoup(r.text, "lxml")
+                for a in soup.find_all("a", href=True):
+                    h = a["href"]
+                    if "linkedin.com/in/" in h and "http" in h:
+                        self.results["urls"].add(h.split("&")[0])
+                        name = a.get_text(strip=True)
+                        if name and len(name) < 80 and not name.startswith("http"):
+                            self.results["names"].add(name.strip())
+        except:
+            pass
+
+    # ── Shodan (needs API key: SHODAN_API_KEY) ──
+    async def search_shodan(self):
+        key = API_KEYS.get("shodan")
+        if not key:
+            return
+        try:
+            ips = set()
+            for _, _, _, _, sa in socket.getaddrinfo(self.domain, 80, socket.AF_INET):
+                ips.add(sa[0])
+            for ip in list(ips)[:5]:
+                url = f"https://api.shodan.io/shodan/host/{ip}?key={key}"
+                r = await self.client.get(url)
+                if r.status_code == 200:
+                    data = r.json()
+                    for hostname in data.get("hostnames", []):
+                        h = hostname.lower()
+                        if h.endswith(self.domain) and is_valid_subdomain(h, self.domain):
+                            self.results["subdomains"].add(h)
+                    for port in data.get("ports", []):
+                        self.results["urls"].add(f"{ip}:{port}")
+                    for service in data.get("data", []):
+                        transport = service.get("transport", "")
+                        port = service.get("port", "")
+                        product = service.get("product", "")
+                        if product:
+                            self.results["urls"].add(f"{ip}:{port}/{transport} ({product})")
+        except:
+            pass
+
+    # ── Hunter.io (needs API key: HUNTER_API_KEY) ──
+    async def search_hunter(self):
+        key = API_KEYS.get("hunter")
+        if not key:
+            return
+        url = f"https://api.hunter.io/v2/domain-search?domain={self.domain}&api_key={key}&limit={min(self.limit, 100)}"
+        try:
+            r = await self.client.get(url)
+            if r.status_code == 200:
+                data = r.json().get("data", {})
+                for email in data.get("emails", []):
+                    addr = email.get("value", "").lower()
+                    if addr:
+                        self.results["emails"].add(addr)
+                    first = email.get("first_name", "")
+                    last = email.get("last_name", "")
+                    if first and last:
+                        self.results["names"].add(f"{first} {last}")
+        except:
+            pass
+
+    # ── SecurityTrails (needs API key: SECURITYTRAILS_API_KEY) ──
+    async def search_securitytrails(self):
+        key = API_KEYS.get("securitytrails")
+        if not key:
+            return
+        url = f"https://api.securitytrails.com/v1/domain/{self.domain}/subdomains"
+        try:
+            r = await self.client.get(url, headers={"APIKEY": key})
+            if r.status_code == 200:
+                for sub in r.json().get("subdomains", []):
+                    full = f"{sub}.{self.domain}".lower()
+                    if is_valid_subdomain(full, self.domain):
+                        self.results["subdomains"].add(full)
+        except:
+            pass
+
+        # Also query DNS history
+        url2 = f"https://api.securitytrails.com/v1/history/{self.domain}/dns/a"
+        try:
+            r = await self.client.get(url2, headers={"APIKEY": key})
+            if r.status_code == 200:
+                for record in r.json().get("records", [])[:self.limit]:
+                    ip = record.get("organizations", [{}])[0].get("ip", "") if record.get("organizations") else ""
+                    if ip:
+                        self.results["ips"].add(ip)
+        except:
+            pass
+
+    # ── VirusTotal (needs API key: VIRUSTOTAL_API_KEY) ──
+    async def search_virustotal(self):
+        key = API_KEYS.get("virustotal")
+        if not key:
+            return
+        url = f"https://www.virustotal.com/api/v3/domains/{self.domain}/subdomains?limit={min(self.limit, 100)}"
+        try:
+            r = await self.client.get(url, headers={"x-apikey": key})
+            if r.status_code == 200:
+                for item in r.json().get("data", []):
+                    sub = item.get("id", "").lower()
+                    if is_valid_subdomain(sub, self.domain):
+                        self.results["subdomains"].add(sub)
+        except:
+            pass
+
+    # ── DNS Brute Force ──
+    async def search_dns_brute(self, wordlist: list = None):
+        words = wordlist or DNS_WORDLIST
+        resolved = set()
+        for word in words[:self.limit]:
+            host = f"{word}.{self.domain}"
+            try:
+                for _, _, _, _, sa in socket.getaddrinfo(host, 80, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP):
+                    ip = sa[0]
+                    if ip not in resolved:
+                        resolved.add(ip)
+                        self.results["subdomains"].add(host)
+                        self.results["ips"].add(ip)
+            except:
+                pass
+
     # ── Extract emails from collected URLs ──
     def extract_emails_from_urls(self):
         email_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
@@ -405,6 +566,12 @@ class ReconEngine:
             "bufferover": self.search_bufferover,
             "certspotter": self.search_certspotter,
             "shodan_idb": self.search_shodan_idb,
+            "linkedin": self.search_linkedin,
+            "shodan": self.search_shodan,
+            "hunter": self.search_hunter,
+            "securitytrails": self.search_securitytrails,
+            "virustotal": self.search_virustotal,
+            "dns_brute": lambda: self.search_dns_brute(self.wordlist),
         }
         for src in sources:
             fn = source_map.get(src)
@@ -421,11 +588,13 @@ class ReconEngine:
             "subdomains": sorted(self.results["subdomains"]),
             "ips": sorted(self.results["ips"]),
             "urls": sorted(self.results["urls"])[:self.limit],
+            "names": sorted(self.results["names"]),
             "stats": {
                 "emails": len(self.results["emails"]),
                 "subdomains": len(self.results["subdomains"]),
                 "ips": len(self.results["ips"]),
                 "urls": min(len(self.results["urls"]), self.limit),
+                "names": len(self.results["names"]),
             },
         }
 
@@ -443,10 +612,12 @@ def parse_args():
     )
     p.add_argument("-d", "--domain", required=True, help="Target domain")
     p.add_argument("-b", "--sources", default="all",
-                   help="Comma-separated sources: google,bing,baidu,yahoo,crtsh,dns,otx,wayback,github,pastes,dnsdumpster,threatcrowd,rapiddns,urlscan,bufferover,certspotter,shodan_idb (default: all)")
+                   help="Comma-separated sources: google,bing,baidu,yahoo,crtsh,dns,otx,wayback,github,pastes,dnsdumpster,threatcrowd,rapiddns,urlscan,bufferover,certspotter,shodan_idb,linkedin,shodan,hunter,securitytrails,virustotal,dns_brute (default: all)")
     p.add_argument("-l", "--limit", type=int, default=100, help="Max results per source (default: 100)")
     p.add_argument("-t", "--timeout", type=int, default=20, help="HTTP timeout per request (default: 20s)")
     p.add_argument("-o", "--output", choices=["text", "json"], default="text", help="Output format (default: text)")
+    p.add_argument("-w", "--wordlist", help="Custom wordlist file for DNS brute force (one subdomain per line)")
+    p.add_argument("-c", "--dns-brute", action="store_true", help="Enable DNS brute force subdomain discovery")
     p.add_argument("--no-banner", action="store_true", help="Suppress banner")
     return p.parse_args()
 
@@ -456,7 +627,23 @@ def main():
     if not args.no_banner:
         banner()
 
-    sources = ["google", "bing", "baidu", "yahoo", "crtsh", "dns", "otx", "wayback", "github", "pastes", "dnsdumpster", "threatcrowd", "rapiddns", "urlscan", "bufferover", "certspotter", "shodan_idb"]
+    wordlist = DNS_WORDLIST
+    if args.wordlist:
+        try:
+            with open(args.wordlist) as f:
+                wordlist = [w.strip().lower() for w in f.read().splitlines() if w.strip()]
+            print(f"{Colors.INFO}[*] Wordlist:{Colors.R} {args.wordlist} ({len(wordlist)} words){Colors.R}")
+        except FileNotFoundError:
+            print(f"{Colors.ERR}[!] Wordlist not found: {args.wordlist}{Colors.R}")
+            return
+
+    sources = ["google", "bing", "baidu", "yahoo", "crtsh", "dns", "otx", "wayback", "github", "pastes", "dnsdumpster", "threatcrowd", "rapiddns", "urlscan", "bufferover", "certspotter", "shodan_idb", "linkedin"]
+    if args.dns_brute:
+        sources.append("dns_brute")
+    api_sources = ["shodan", "hunter", "securitytrails", "virustotal"]
+    for s in api_sources:
+        if API_KEYS.get(s):
+            sources.append(s)
     if args.sources != "all":
         sources = [s.strip().lower() for s in args.sources.split(",")]
 
@@ -465,7 +652,7 @@ def main():
     print(f"{Colors.INFO}[*] Limit:{Colors.R} {args.limit}\n")
 
     async def run():
-        engine = ReconEngine(args.domain, args.limit, args.timeout)
+        engine = ReconEngine(args.domain, args.limit, args.timeout, wordlist)
         try:
             await engine.run_all(sources)
         except asyncio.CancelledError:
@@ -492,6 +679,7 @@ def main():
         print(f"{Colors.INFO}  Subdomains: {Colors.OK}{stats['subdomains']}{Colors.R}")
         print(f"{Colors.INFO}  IPs:        {Colors.OK}{stats['ips']}{Colors.R}")
         print(f"{Colors.INFO}  URLs:       {Colors.OK}{stats['urls']}{Colors.R}")
+        print(f"{Colors.INFO}  Names:      {Colors.OK}{stats['names']}{Colors.R}")
         print(f"{Colors.INFO}  Time:       {elapsed:.1f}s\n")
 
         if data["emails"]:
@@ -512,6 +700,12 @@ def main():
             print(f"{Colors.OK}── IPs ──{Colors.R}")
             for ip in data["ips"][:30]:
                 print(f"  {ip}")
+            print()
+
+        if data["names"]:
+            print(f"{Colors.OK}── People ──{Colors.R}")
+            for name in data["names"][:30]:
+                print(f"  {name}")
             print()
 
     # Save to file
