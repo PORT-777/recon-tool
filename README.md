@@ -20,16 +20,16 @@ Multi-source OSINT reconnaissance tool for email, subdomain, IP, name, and URL d
 ```bash
 git clone https://github.com/PORT-777/recon-tool.git
 cd recon-tool
-pip install -r requirements.txt
+chmod +x recon
 ```
 
 ## Usage
 
 ```bash
-python recon.py -d example.com -b all
-python recon.py -d example.com -b crtsh,dns,urlscan -l 200
-python recon.py -d example.com -b all -o html
-python recon.py -d example.com -b dns -c --takeover --scrape --vhost --screenshot ./shots
+./recon -d example.com -b all
+./recon -d example.com -b crtsh,dns,urlscan -l 200
+./recon -d example.com -b all -o html
+./recon -d example.com -b dns -c --takeover --scrape --vhost --screenshot ./shots
 ```
 
 ### Arguments
