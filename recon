@@ -1,3 +1,16 @@
 #!/usr/bin/env bash
 DIR="$(cd "$(dirname "$0")" && pwd)"
-exec /home/kali/osint-platform/venv/bin/python3 "$DIR/recon.py" "$@"
+
+PYTHON=""
+for P in "$DIR/venv/bin/python3" /home/kali/osint-platform/venv/bin/python3; do
+    if [ -f "$P" ]; then
+        PYTHON="$P"
+        break
+    fi
+done
+
+if [ -z "$PYTHON" ]; then
+    PYTHON="python3"
+fi
+
+exec "$PYTHON" "$DIR/recon.py" "$@"

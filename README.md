@@ -15,12 +15,21 @@ Multi-source OSINT reconnaissance tool for email, subdomain, IP, name, and URL d
 - **Proxy support** — HTTP/HTTPS/SOCKS5
 - **Output formats** — text, JSON, HTML report
 
-## Installation
+## Quick Start
 
 ```bash
 git clone https://github.com/PORT-777/recon-tool.git
 cd recon-tool
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 chmod +x recon
+```
+
+Or install system-wide:
+```bash
+pip install -e .
+recon -d example.com -b all
 ```
 
 ## Usage

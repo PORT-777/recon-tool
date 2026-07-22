@@ -825,8 +825,6 @@ except Exception as e:
             "securitytrails": self.search_securitytrails,
             "virustotal": self.search_virustotal,
             "dns_brute": lambda: self.search_dns_brute(self.wordlist),
-            "takeover": self.check_takeover,
-            "scrape": self.scrape_pages,
             "dns_resolve": self.dns_resolve,
             "vhost": self.detect_vhosts,
             "screenshot": lambda: None,
