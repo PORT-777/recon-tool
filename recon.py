@@ -10,11 +10,12 @@ Usage:
 Author: PORT 777
 """
 
-import argparse, asyncio, json, os, re, socket, sys, time
+import argparse, asyncio, json, os, re, socket, subprocess, sys, time
 from urllib.parse import quote, urlparse, parse_qs
 from email.utils import parseaddr
 from collections import defaultdict
 from pathlib import Path
+from datetime import datetime
 
 import httpx
 from bs4 import BeautifulSoup
@@ -22,7 +23,7 @@ from colorama import Fore, Style, init
 
 init(autoreset=True)
 
-VERSION = "4.0.0"
+VERSION = "5.0.0"
 
 # ── API Keys (from ~/.recon-tool/api-keys.yaml or env vars) ──
 # Format (YAML):
@@ -174,6 +175,8 @@ class ReconEngine:
             client_kwargs["proxies"] = proxy
         self.client = httpx.AsyncClient(**client_kwargs)
         self.results = defaultdict(set)
+        self.results["vhosts"] = []
+        self.results["screenshots"] = []
 
     async def close(self):
         await self.client.aclose()
@@ -638,6 +641,72 @@ class ReconEngine:
             except:
                 pass
 
+    # ── DNS Resolve (resolve all subdomains to IPs) ──
+    async def dns_resolve(self, resolvers: list = None):
+        if not self.results["subdomains"]:
+            return
+        for sub in list(self.results["subdomains"]):
+            try:
+                ips = set()
+                for _, _, _, _, sa in socket.getaddrinfo(sub, 80, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP):
+                    ips.add(sa[0])
+                for ip in ips:
+                    self.results["ips"].add(ip)
+            except:
+                pass
+
+    # ── Virtual Host Detection ──
+    async def detect_vhosts(self):
+        ip_to_hosts = defaultdict(list)
+        for sub in list(self.results["subdomains"]):
+            try:
+                for _, _, _, _, sa in socket.getaddrinfo(sub, 80, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP):
+                    ip_to_hosts[sa[0]].append(sub)
+            except:
+                pass
+        for ip, hosts in ip_to_hosts.items():
+            if len(hosts) > 1:
+                self.results["vhosts"].append(f"{ip} → {', '.join(hosts)}")
+
+    # ── Screenshot (via headless Chrome/Selenium) ──
+    async def take_screenshots(self, output_dir: str):
+        if not self.results["subdomains"]:
+            return
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        for sub in list(self.results["subdomains"]):
+            for proto in ("https", "http"):
+                url = f"{proto}://{sub}"
+                fname = out / f"{sub.replace('.', '_')}.png"
+                if fname.exists():
+                    break
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        "python3", "-c", f"""
+import sys
+try:
+    from selenium import webdriver
+    opt = webdriver.ChromeOptions()
+    opt.add_argument('--headless')
+    opt.add_argument('--no-sandbox')
+    opt.add_argument('--disable-dev-shm-usage')
+    opt.add_argument('--window-size=1280,720')
+    d = webdriver.Chrome(options=opt)
+    d.get('{url}')
+    d.save_screenshot('{fname}')
+    d.quit()
+except Exception as e:
+    sys.exit(0)
+""",
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                    await asyncio.wait_for(proc.wait(), timeout=20)
+                    if fname.exists() and fname.stat().st_size > 1000:
+                        self.results["screenshots"].append(str(fname))
+                        break
+                except:
+                    pass
+
     # ── Extract emails from collected URLs ──
     def extract_emails_from_urls(self):
         email_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
@@ -677,8 +746,15 @@ class ReconEngine:
             "dns_brute": lambda: self.search_dns_brute(self.wordlist),
             "takeover": self.check_takeover,
             "scrape": self.scrape_pages,
+            "dns_resolve": self.dns_resolve,
+            "vhost": self.detect_vhosts,
+            "screenshot": lambda: None,
         }
+        screenshot_dir = None
         for src in sources:
+            if src.startswith("screenshot="):
+                screenshot_dir = src.split("=", 1)[1]
+                continue
             fn = source_map.get(src)
             if fn:
                 tasks.append(fn())
@@ -689,6 +765,12 @@ class ReconEngine:
             await self.check_takeover()
         if "scrape" in sources or "all" in sources:
             await self.scrape_pages()
+        if "dns_resolve" in sources or "all" in sources:
+            await self.dns_resolve()
+        if "vhost" in sources or "all" in sources:
+            await self.detect_vhosts()
+        if screenshot_dir:
+            await self.take_screenshots(screenshot_dir)
 
     def summary(self):
         takeovers = sorted(self.results["takeovers"])
@@ -700,6 +782,8 @@ class ReconEngine:
             "urls": sorted(self.results["urls"])[:self.limit],
             "names": sorted(self.results["names"]),
             "takeovers": takeovers,
+            "vhosts": self.results["vhosts"],
+            "screenshots": self.results["screenshots"],
             "stats": {
                 "emails": len(self.results["emails"]),
                 "subdomains": len(self.results["subdomains"]),
@@ -707,6 +791,8 @@ class ReconEngine:
                 "urls": min(len(self.results["urls"]), self.limit),
                 "names": len(self.results["names"]),
                 "takeovers": len(takeovers),
+                "vhosts": len(self.results["vhosts"]),
+                "screenshots": len(self.results["screenshots"]),
             },
         }
 
@@ -733,6 +819,9 @@ def parse_args():
     p.add_argument("-p", "--proxy", help="Proxy URL (e.g. http://127.0.0.1:8080, socks5://127.0.0.1:9050)")
     p.add_argument("--takeover", action="store_true", help="Check subdomains for takeover vulnerabilities")
     p.add_argument("--scrape", action="store_true", help="Scrape page content for emails and names")
+    p.add_argument("-r", "--dns-resolve", action="store_true", help="Resolve all discovered subdomains to IPs")
+    p.add_argument("--vhost", action="store_true", help="Detect virtual hosts (multiple subdomains on same IP)")
+    p.add_argument("--screenshot", metavar="DIR", help="Take screenshots of discovered subdomains (requires selenium)")
     p.add_argument("-q", "--quiet", action="store_true", help="Suppress missing API key warnings")
     p.add_argument("--no-banner", action="store_true", help="Suppress banner")
     return p.parse_args()
@@ -748,6 +837,8 @@ def _save_html(path: str, data: dict, elapsed: float):
         ("URLs", data["urls"]),
         ("People", data["names"]),
         ("Takeovers", data["takeovers"]),
+        ("Virtual Hosts", data["vhosts"]),
+        ("Screenshots", data["screenshots"]),
     ]:
         if items:
             rows += f"<h2>{label} ({len(items)})</h2><table><tr><th>#</th><th>Value</th></tr>"
@@ -782,6 +873,8 @@ tr:hover {{ background: #1c2128; }}
 <div class="stat"><div class="num">{s["urls"]}</div><div class="lbl">URLs</div></div>
 <div class="stat"><div class="num">{s["names"]}</div><div class="lbl">People</div></div>
 <div class="stat"><div class="num">{s["takeovers"]}</div><div class="lbl">Takeovers</div></div>
+<div class="stat"><div class="num">{s["vhosts"]}</div><div class="lbl">VHosts</div></div>
+<div class="stat"><div class="num">{s["screenshots"]}</div><div class="lbl">Screenshots</div></div>
 <div class="stat"><div class="num">{elapsed:.1f}s</div><div class="lbl">Time</div></div>
 </div>
 {rows}
@@ -820,6 +913,12 @@ def main():
         sources.append("takeover")
     if args.scrape:
         sources.append("scrape")
+    if args.dns_resolve:
+        sources.append("dns_resolve")
+    if args.vhost:
+        sources.append("vhost")
+    if args.screenshot:
+        sources.append(f"screenshot={args.screenshot}")
     api_sources = ["shodan", "hunter", "securitytrails", "virustotal"]
     if args.sources == "all":
         for s in api_sources:
@@ -867,6 +966,8 @@ def main():
         print(f"{Colors.INFO}  IPs:        {Colors.OK}{stats['ips']}{Colors.R}")
         print(f"{Colors.INFO}  URLs:       {Colors.OK}{stats['urls']}{Colors.R}")
         print(f"{Colors.INFO}  Names:      {Colors.OK}{stats['names']}{Colors.R}")
+        print(f"{Colors.INFO}  VHosts:     {Colors.OK}{stats['vhosts']}{Colors.R}")
+        print(f"{Colors.INFO}  Screenshots:{Colors.OK}{stats['screenshots']}{Colors.R}")
         print(f"{Colors.INFO}  Time:       {elapsed:.1f}s\n")
 
         if data["emails"]:
@@ -899,6 +1000,12 @@ def main():
             print(f"{Colors.ERR}── Takeovers ──{Colors.R}")
             for t in data["takeovers"]:
                 print(f"  {Colors.WARN}{t}{Colors.R}")
+            print()
+
+        if data["vhosts"]:
+            print(f"{Colors.INFO}── Virtual Hosts ──{Colors.R}")
+            for v in data["vhosts"][:20]:
+                print(f"  {v}")
             print()
 
     # Save to file
