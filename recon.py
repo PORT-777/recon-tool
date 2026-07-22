@@ -22,7 +22,7 @@ from colorama import Fore, Style, init
 
 init(autoreset=True)
 
-VERSION = "3.0.0"
+VERSION = "4.0.0"
 
 # ── API Keys (from env vars) ──
 API_KEYS = {
@@ -51,7 +51,33 @@ DNS_WORDLIST = [
     "go", "lp", "landing", "offer", "promo", "campaign", "marketing", "email",
     "click", "track", "links", "redirect", "go2", "click2", "r", "s",
     "t", "w", "w3", "w5", "ww", "www1", "www2", "www3", "www4",
-    "www5", "www6", "www7", "www8", "www9", "www10",
+    "www5", "www6", "www7", "www8", "www9",     "www10",
+]
+
+# ── Takeover fingerprints ──
+TAKEOVER_FINGERPRINTS = [
+    {"service": "AWS S3",             "pattern": "NoSuchBucket",                       "status": [404]},
+    {"service": "AWS S3",             "pattern": "The specified bucket does not exist", "status": [404]},
+    {"service": "GitHub Pages",       "pattern": "There isn't a GitHub Pages site",     "status": [404]},
+    {"service": "GitHub Pages",       "pattern": "Site not found",                     "status": [404]},
+    {"service": "Heroku",             "pattern": "No such app",                         "status": [404]},
+    {"service": "Azure",              "pattern": "Web site not found",                  "status": [404]},
+    {"service": "CloudFront",         "pattern": "The requested URL was not found",     "status": [404]},
+    {"service": "CloudFront",         "pattern": "Origin error",                        "status": [404, 502]},
+    {"service": "Shopify",            "pattern": "Sorry, this shop is currently unavailable", "status": [404]},
+    {"service": "Shopify",            "pattern": "Only one step left",                  "status": [200]},
+    {"service": "Pantheon",           "pattern": "The gods are angry",                  "status": [404]},
+    {"service": "Tumblr",             "pattern": "There's nothing here",                "status": [404]},
+    {"service": "Ghost",              "pattern": "The thing you were looking for is no longer here", "status": [404]},
+    {"service": "Squarespace",        "pattern": "No Such Account",                     "status": [404]},
+    {"service": "Unbounce",           "pattern": "The requested URL was not found on this server", "status": [404]},
+    {"service": "Freshdesk",          "pattern": "This support portal is no longer available", "status": [404]},
+    {"service": "Zendesk",            "pattern": "Help Center Closed",                  "status": [404]},
+    {"service": "Bitbucket",          "pattern": "The page you were looking for does not exist", "status": [404]},
+    {"service": "Fly.io",             "pattern": "404 Not Found",                       "status": [404]},
+    {"service": "Netlify",            "pattern": "Not Found - Netlify",                 "status": [404]},
+    {"service": "Vercel",             "pattern": "The page could not be found",        "status": [404]},
+    {"service": "Surge.sh",           "pattern": "project not found",                   "status": [404]},
 ]
 
 # ──────────────────────────────────────────────
@@ -105,16 +131,19 @@ def domain_from_email(email: str):
 
 
 class ReconEngine:
-    def __init__(self, domain: str, limit: int = 100, timeout: int = 20, wordlist: list = None):
+    def __init__(self, domain: str, limit: int = 100, timeout: int = 20, wordlist: list = None, proxy: str = None):
         self.domain = domain.lower().strip()
         self.limit = limit
         self.wordlist = wordlist or DNS_WORDLIST
-        self.client = httpx.AsyncClient(
-            timeout=timeout,
-            verify=False,
-            follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) recon-tool/3.0"}
-        )
+        client_kwargs = {
+            "timeout": timeout,
+            "verify": False,
+            "follow_redirects": True,
+            "headers": {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) recon-tool/4.0"},
+        }
+        if proxy:
+            client_kwargs["proxies"] = proxy
+        self.client = httpx.AsyncClient(**client_kwargs)
         self.results = defaultdict(set)
 
     async def close(self):
@@ -535,6 +564,51 @@ class ReconEngine:
             except:
                 pass
 
+    # ── Takeover Detection ──
+    async def check_takeover(self):
+        async def _check_one(sub):
+            for fp in TAKEOVER_FINGERPRINTS:
+                for proto in ("http", "https"):
+                    try:
+                        r = await self.client.get(f"{proto}://{sub}", timeout=5)
+                        if r.status_code in fp["status"] and fp["pattern"].lower() in r.text.lower():
+                            self.results["takeovers"].add(f"{sub} → {fp['service']}")
+                            return
+                    except:
+                        pass
+        tasks = [_check_one(s) for s in list(self.results["subdomains"])]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    # ── Page Content Scraping (emails + names from pages) ──
+    async def scrape_pages(self):
+        email_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+        for url in list(self.results["urls"])[:50]:
+            try:
+                r = await self.client.get(url, timeout=15)
+                if r.status_code == 200:
+                    text = r.text
+                    # Emails
+                    for em in email_pattern.findall(text):
+                        cleaned = email_clean(em)
+                        if cleaned and domain_from_email(cleaned) == self.domain:
+                            self.results["emails"].add(cleaned)
+                    # Names from page
+                    soup = BeautifulSoup(text, "lxml")
+                    for tag in soup.find_all(["h1", "h2", "h3", "title", "meta"]):
+                        if tag.name == "meta":
+                            name = tag.get("name", "")
+                            if name in ("author", "creator"):
+                                content = tag.get("content", "").strip()
+                                if content and len(content) < 60:
+                                    self.results["names"].add(content)
+                        else:
+                            t = tag.get_text(strip=True)
+                            if t and len(t) < 50 and " " in t and not t.startswith("http"):
+                                self.results["names"].add(t)
+            except:
+                pass
+
     # ── Extract emails from collected URLs ──
     def extract_emails_from_urls(self):
         email_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
@@ -572,6 +646,8 @@ class ReconEngine:
             "securitytrails": self.search_securitytrails,
             "virustotal": self.search_virustotal,
             "dns_brute": lambda: self.search_dns_brute(self.wordlist),
+            "takeover": self.check_takeover,
+            "scrape": self.scrape_pages,
         }
         for src in sources:
             fn = source_map.get(src)
@@ -580,8 +656,13 @@ class ReconEngine:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.extract_emails_from_urls()
+        if "takeover" in sources or "all" in sources or "dns_brute" in sources:
+            await self.check_takeover()
+        if "scrape" in sources or "all" in sources:
+            await self.scrape_pages()
 
     def summary(self):
+        takeovers = sorted(self.results["takeovers"])
         return {
             "domain": self.domain,
             "emails": sorted(self.results["emails"]),
@@ -589,12 +670,14 @@ class ReconEngine:
             "ips": sorted(self.results["ips"]),
             "urls": sorted(self.results["urls"])[:self.limit],
             "names": sorted(self.results["names"]),
+            "takeovers": takeovers,
             "stats": {
                 "emails": len(self.results["emails"]),
                 "subdomains": len(self.results["subdomains"]),
                 "ips": len(self.results["ips"]),
                 "urls": min(len(self.results["urls"]), self.limit),
                 "names": len(self.results["names"]),
+                "takeovers": len(takeovers),
             },
         }
 
@@ -615,11 +698,67 @@ def parse_args():
                    help="Comma-separated sources: google,bing,baidu,yahoo,crtsh,dns,otx,wayback,github,pastes,dnsdumpster,threatcrowd,rapiddns,urlscan,bufferover,certspotter,shodan_idb,linkedin,shodan,hunter,securitytrails,virustotal,dns_brute (default: all)")
     p.add_argument("-l", "--limit", type=int, default=100, help="Max results per source (default: 100)")
     p.add_argument("-t", "--timeout", type=int, default=20, help="HTTP timeout per request (default: 20s)")
-    p.add_argument("-o", "--output", choices=["text", "json"], default="text", help="Output format (default: text)")
+    p.add_argument("-o", "--output", choices=["text", "json", "html"], default="text", help="Output format (default: text)")
     p.add_argument("-w", "--wordlist", help="Custom wordlist file for DNS brute force (one subdomain per line)")
     p.add_argument("-c", "--dns-brute", action="store_true", help="Enable DNS brute force subdomain discovery")
+    p.add_argument("-p", "--proxy", help="Proxy URL (e.g. http://127.0.0.1:8080, socks5://127.0.0.1:9050)")
+    p.add_argument("--takeover", action="store_true", help="Check subdomains for takeover vulnerabilities")
+    p.add_argument("--scrape", action="store_true", help="Scrape page content for emails and names")
     p.add_argument("--no-banner", action="store_true", help="Suppress banner")
     return p.parse_args()
+
+
+def _save_html(path: str, data: dict, elapsed: float):
+    s = data["stats"]
+    rows = ""
+    for label, items in [
+        ("Emails", data["emails"]),
+        ("Subdomains", data["subdomains"]),
+        ("IPs", data["ips"]),
+        ("URLs", data["urls"]),
+        ("People", data["names"]),
+        ("Takeovers", data["takeovers"]),
+    ]:
+        if items:
+            rows += f"<h2>{label} ({len(items)})</h2><table><tr><th>#</th><th>Value</th></tr>"
+            for i, v in enumerate(items, 1):
+                cls = "takeover" if label == "Takeovers" else ""
+                rows += f"<tr class='{cls}'><td>{i}</td><td>{v}</td></tr>"
+            rows += "</table>"
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Recon Report — {data["domain"]}</title>
+<style>
+body {{ font-family: 'Courier New', monospace; background: #0d1117; color: #c9d1d9; margin: 40px; }}
+h1 {{ color: #58a6ff; border-bottom: 2px solid #30363d; padding-bottom: 10px; }}
+h2 {{ color: #f0883e; margin-top: 30px; }}
+.stats {{ display: flex; gap: 20px; flex-wrap: wrap; margin: 20px 0; }}
+.stat {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px 25px; text-align: center; }}
+.stat .num {{ font-size: 28px; font-weight: bold; color: #58a6ff; }}
+.stat .lbl {{ font-size: 12px; color: #8b949e; text-transform: uppercase; }}
+table {{ width: 100%; border-collapse: collapse; margin: 10px 0; }}
+th, td {{ padding: 8px 12px; text-align: left; border-bottom: 1px solid #30363d; }}
+th {{ background: #161b22; color: #58a6ff; }}
+tr:hover {{ background: #1c2128; }}
+.takeover td {{ color: #f85149; font-weight: bold; }}
+.footer {{ margin-top: 40px; color: #8b949e; font-size: 12px; border-top: 1px solid #30363d; padding-top: 10px; }}
+</style>
+</head><body>
+<h1>🔍 Recon Report — {data["domain"]}</h1>
+<div class="stats">
+<div class="stat"><div class="num">{s["emails"]}</div><div class="lbl">Emails</div></div>
+<div class="stat"><div class="num">{s["subdomains"]}</div><div class="lbl">Subdomains</div></div>
+<div class="stat"><div class="num">{s["ips"]}</div><div class="lbl">IPs</div></div>
+<div class="stat"><div class="num">{s["urls"]}</div><div class="lbl">URLs</div></div>
+<div class="stat"><div class="num">{s["names"]}</div><div class="lbl">People</div></div>
+<div class="stat"><div class="num">{s["takeovers"]}</div><div class="lbl">Takeovers</div></div>
+<div class="stat"><div class="num">{elapsed:.1f}s</div><div class="lbl">Time</div></div>
+</div>
+{rows}
+<div class="footer">Generated by recon-tool v{VERSION} — PORT 777</div>
+</body></html>"""
+    with open(path, "w") as f:
+        f.write(html)
 
 
 def main():
@@ -637,9 +776,16 @@ def main():
             print(f"{Colors.ERR}[!] Wordlist not found: {args.wordlist}{Colors.R}")
             return
 
+    if args.proxy:
+        print(f"{Colors.INFO}[*] Proxy:{Colors.R} {args.proxy}{Colors.R}")
+
     sources = ["google", "bing", "baidu", "yahoo", "crtsh", "dns", "otx", "wayback", "github", "pastes", "dnsdumpster", "threatcrowd", "rapiddns", "urlscan", "bufferover", "certspotter", "shodan_idb", "linkedin"]
     if args.dns_brute:
         sources.append("dns_brute")
+    if args.takeover:
+        sources.append("takeover")
+    if args.scrape:
+        sources.append("scrape")
     api_sources = ["shodan", "hunter", "securitytrails", "virustotal"]
     for s in api_sources:
         if API_KEYS.get(s):
@@ -652,7 +798,7 @@ def main():
     print(f"{Colors.INFO}[*] Limit:{Colors.R} {args.limit}\n")
 
     async def run():
-        engine = ReconEngine(args.domain, args.limit, args.timeout, wordlist)
+        engine = ReconEngine(args.domain, args.limit, args.timeout, wordlist, args.proxy)
         try:
             await engine.run_all(sources)
         except asyncio.CancelledError:
@@ -708,11 +854,22 @@ def main():
                 print(f"  {name}")
             print()
 
+        if data["takeovers"]:
+            print(f"{Colors.ERR}── Takeovers ──{Colors.R}")
+            for t in data["takeovers"]:
+                print(f"  {Colors.WARN}{t}{Colors.R}")
+            print()
+
     # Save to file
+    ts = int(time.time())
     if args.output == "json":
-        fname = f"recon_{args.domain}_{int(time.time())}.json"
+        fname = f"recon_{args.domain}_{ts}.json"
         with open(fname, "w") as f:
             json.dump(data, f, indent=2)
+        print(f"\n{Colors.OK}[+] Saved to {fname}{Colors.R}")
+    elif args.output == "html":
+        fname = f"recon_{args.domain}_{ts}.html"
+        _save_html(fname, data, elapsed)
         print(f"\n{Colors.OK}[+] Saved to {fname}{Colors.R}")
 
 
