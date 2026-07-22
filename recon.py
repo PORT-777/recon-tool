@@ -7,7 +7,7 @@ Usage:
     python recon.py -d example.com -b google -l 100
     python recon.py -d example.com -b all -l 200 -o json
 
-Author: PORT777
+Author: PORT 777
 """
 
 import argparse, asyncio, json, re, sys, time
@@ -40,7 +40,7 @@ def banner():
     ╔══════════════════════════════════╗
     ║     RECON-TOOL v{VERSION:<8}       ║
     ║  Email · Subdomain · IP · Name   ║
-    ║         by PORT777               ║
+    ║        by PORT 777               ║
     ╚══════════════════════════════════╝{Colors.R}
     """)
 
