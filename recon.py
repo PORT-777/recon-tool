@@ -24,13 +24,42 @@ init(autoreset=True)
 
 VERSION = "4.0.0"
 
-# ── API Keys (from env vars) ──
-API_KEYS = {
-    "shodan": os.getenv("SHODAN_API_KEY", ""),
-    "hunter": os.getenv("HUNTER_API_KEY", ""),
-    "securitytrails": os.getenv("SECURITYTRAILS_API_KEY", ""),
-    "virustotal": os.getenv("VIRUSTOTAL_API_KEY", ""),
+# ── API Keys (from ~/.recon-tool/api-keys.yaml or env vars) ──
+# Format (YAML):
+#   shodan: YOUR_KEY
+#   hunter: YOUR_KEY
+#   securitytrails: YOUR_KEY
+#   virustotal: YOUR_KEY
+API_KEY_ENV = {
+    "shodan":         "SHODAN_API_KEY",
+    "hunter":         "HUNTER_API_KEY",
+    "securitytrails": "SECURITYTRAILS_API_KEY",
+    "virustotal":     "VIRUSTOTAL_API_KEY",
 }
+
+def load_api_keys():
+    keys = {}
+    config_path = Path.home() / ".recon-tool" / "api-keys.yaml"
+    if config_path.exists():
+        try:
+            import yaml
+            with open(config_path) as f:
+                yaml_keys = yaml.safe_load(f) or {}
+            for k, v in yaml_keys.items():
+                if v and isinstance(v, str):
+                    keys[k] = v
+        except ImportError:
+            pass
+        except Exception:
+            pass
+    for section, env_name in API_KEY_ENV.items():
+        if not keys.get(section):
+            val = os.getenv(env_name)
+            if val:
+                keys[section] = val
+    return keys
+
+API_KEYS = load_api_keys()
 
 DNS_WORDLIST = [
     "www", "mail", "remote", "blog", "webmail", "server", "ns1", "ns2",
@@ -704,6 +733,7 @@ def parse_args():
     p.add_argument("-p", "--proxy", help="Proxy URL (e.g. http://127.0.0.1:8080, socks5://127.0.0.1:9050)")
     p.add_argument("--takeover", action="store_true", help="Check subdomains for takeover vulnerabilities")
     p.add_argument("--scrape", action="store_true", help="Scrape page content for emails and names")
+    p.add_argument("-q", "--quiet", action="store_true", help="Suppress missing API key warnings")
     p.add_argument("--no-banner", action="store_true", help="Suppress banner")
     return p.parse_args()
 
@@ -779,6 +809,10 @@ def main():
     if args.proxy:
         print(f"{Colors.INFO}[*] Proxy:{Colors.R} {args.proxy}{Colors.R}")
 
+    config_path = Path.home() / ".recon-tool" / "api-keys.yaml"
+    if config_path.exists():
+        print(f"{Colors.INFO}Read api-keys from {config_path}{Colors.R}")
+
     sources = ["google", "bing", "baidu", "yahoo", "crtsh", "dns", "otx", "wayback", "github", "pastes", "dnsdumpster", "threatcrowd", "rapiddns", "urlscan", "bufferover", "certspotter", "shodan_idb", "linkedin"]
     if args.dns_brute:
         sources.append("dns_brute")
@@ -787,11 +821,18 @@ def main():
     if args.scrape:
         sources.append("scrape")
     api_sources = ["shodan", "hunter", "securitytrails", "virustotal"]
-    for s in api_sources:
-        if API_KEYS.get(s):
-            sources.append(s)
-    if args.sources != "all":
-        sources = [s.strip().lower() for s in args.sources.split(",")]
+    if args.sources == "all":
+        for s in api_sources:
+            if API_KEYS.get(s):
+                sources.append(s)
+            elif not args.quiet:
+                print(f"{Colors.WARN}[!] Missing API key for {s}{Colors.R}")
+    else:
+        user_sources = [s.strip().lower() for s in args.sources.split(",")]
+        for s in user_sources:
+            if s in api_sources and not API_KEYS.get(s) and not args.quiet:
+                print(f"{Colors.WARN}[!] Missing API key for {s}{Colors.R}")
+        sources = user_sources
 
     print(f"{Colors.INFO}[*] Target:{Colors.R} {args.domain}")
     print(f"{Colors.INFO}[*] Sources:{Colors.R} {', '.join(sources)}")
